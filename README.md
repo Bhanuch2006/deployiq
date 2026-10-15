@@ -49,7 +49,13 @@ git push -u origin main
 
 Replace YOUR_USERNAME. Check the repository's Actions tab for DeployIQ CI.
 It tests the application, builds the container, and checks its health endpoint.
-It does not deploy to AWS yet.
+On main pushes or manual main runs, it also uploads the tested image to private ECR
+using GitHub OIDC and DeployIQGitHubECRRole. It does not start an AWS server yet.
+Each image tag includes the commit SHA, run ID, and attempt, so reruns work with
+immutable ECR tags. Pull requests and other branches do not upload images.
+
+The required role trust policy is in infrastructure/github-trust-policy.json.
+It restricts access to this repository and main branch using their numeric IDs.
 
 ## Team modules
 
