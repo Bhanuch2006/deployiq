@@ -1,0 +1,46 @@
+name: DeployIQ CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sample-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: sample-app/requirements*.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+  docker-build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container
+        run: docker build -t deployiq-sample:ci ./sample-app
+      - name: Check running container
+        shell: bash
+        run: |
+          docker run -d --name deployiq-sample -p 127.0.0.1:8000:8000 deployiq-sample:ci
+          trap 'docker logs deployiq-sample; docker rm -f deployiq-sample' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
