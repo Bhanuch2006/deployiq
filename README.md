@@ -50,7 +50,14 @@ git push -u origin main
 Replace YOUR_USERNAME. Check the repository's Actions tab for DeployIQ CI.
 It tests the application, builds the container, and checks its health endpoint.
 On main pushes or manual main runs, it also uploads the tested image to private ECR
-using GitHub OIDC and DeployIQGitHubECRRole. It does not start an AWS server yet.
+using GitHub OIDC and DeployIQGitHubECRRole. It then deploys that exact image to the existing EC2 demo server through Systems Manager.
+Attach infrastructure/github-deploy-policy.json to DeployIQGitHubECRRole before pushing.
+Deployment first checks a candidate on localhost:8001, then replaces the port-80
+container, with a brief interruption. A failed replacement attempts to restore the
+previous container and fails CI. The SSM runner reports remote success or failure.
+Concurrent workflow runs do not cancel an active deployment. Server-side locking
+also prevents overlapping container replacements. The instance must be running and
+online in Systems Manager. It is currently i-0e4717493127d0d23 in us-east-1.
 Each image tag includes the commit SHA, run ID, and attempt, so reruns work with
 immutable ECR tags. Pull requests and other branches do not upload images.
 

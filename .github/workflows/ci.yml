@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -30,7 +30,7 @@ jobs:
       id-token: write
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Build container
@@ -66,3 +66,9 @@ jobs:
           docker tag deployiq-sample:ci "$IMAGE_URI"
           docker push "$IMAGE_URI"
           echo "Uploaded image: $IMAGE_URI" >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy release to EC2
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          EC2_INSTANCE_ID: i-0e4717493127d0d23
+          IMAGE_URI: 360582629770.dkr.ecr.us-east-1.amazonaws.com/deployiqsample:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 infrastructure/scripts/deploy_ssm.py
