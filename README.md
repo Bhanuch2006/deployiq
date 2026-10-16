@@ -122,3 +122,12 @@ stack with private S3 and CloudFront HTTPS delivery. Set the five GitHub reposit
 variables from stack Outputs, then run DeployIQ Dashboard. Main-branch frontend
 changes publish automatically. Authentication and pipeline data stay on the
 existing Cognito/API/Lambda/DynamoDB backend.
+
+## Pipeline optimization experiment
+
+See [the measured cache experiment](evaluation/README.md). The manually triggered
+DeployIQ Cache Benchmark workflow measures fresh dependency installations with
+and without a reused pip cache. Cold fill is separate from the warm-cache median.
+The updated monitoring worker imports the real report and the dashboard displays
+its measurements. Enable this with a stack update, then push the code and run the
+experiment. No speedup is claimed until those measurements exist.

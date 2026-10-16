@@ -56,12 +56,23 @@ function SignIn({config, setConfig, onSession, notice}) {
   </main>;
 }
 
+function Benchmark({run}) {
+  if (run.name !== 'DeployIQ Cache Benchmark') return null;
+  const report = run.benchmark;
+  if (!report) return <section className="benchmark"><div className="section-label"><Activity size={16}/><h3>Cache experiment</h3></div><div className="notice">{run.benchmark_status==='failed'?`Report import failed (${run.benchmark_error_code || 'unknown error'}).`:'Measurements are being imported. Refresh shortly, or open the workflow summary in GitHub.'}</div></section>;
+  const summary=report.summary;
+  const maximum=Math.max(summary.baseline_median_seconds,summary.warm_median_seconds,summary.cold_seconds);
+  const change=summary.improvement_percent;
+  return <section className="benchmark"><div className="section-label"><Activity size={16}/><h3>Cache experiment</h3><span className="source ai">Measured</span></div><p className="benchmark-scope">Dependency installation time · seconds</p><div className="benchmark-bars">{[['No cache',summary.baseline_median_seconds,'Median of 4'],['Cold cache',summary.cold_seconds,'First fill · 1 run'],['Warm cache',summary.warm_median_seconds,'Median of 3']].map(([label,seconds,note])=><div className="benchmark-bar" key={label}><div><strong>{label}</strong><span>{seconds.toFixed(2)} s</span></div><meter min="0" max={maximum} value={seconds} aria-label={`${label}: ${seconds.toFixed(2)} seconds`}/><small>{note}</small></div>)}</div><div className={`benchmark-change ${change<0?'slower':''}`}><strong>{Math.abs(change).toFixed(2)}% {change>0?'faster':change<0?'slower':'change'}</strong><span>Warm-cache median versus no-cache median</span></div><p className="benchmark-limit">Same runner and pinned dependencies. This measures pip installation only; it excludes cache restore/save overhead and total pipeline time.</p><details className="benchmark-samples"><summary>Show all 8 measurements <ChevronDown size={13}/></summary><table><thead><tr><th>Round</th><th>Variant</th><th>Cache</th><th>Seconds</th></tr></thead><tbody>{report.samples.map((sample,i)=><tr key={i}><td>{sample.round}</td><td>{sample.variant==='cached'?'Cached':'Baseline'}</td><td>{sample.cache_state}</td><td>{sample.install_seconds.toFixed(4)}</td></tr>)}</tbody></table></details></section>;
+}
+
 function Detail({run, busy, error, onClose}) {
   const link = githubUrl(run?.html_url);
   return <aside className="detail-panel" aria-label="Run details"><div className="panel-heading"><span><Terminal size={16}/> RUN DETAILS</span><button className="icon-button" onClick={onClose} aria-label="Close run details"><X size={17}/></button></div>
     {busy?<div className="detail-loading"><Loader2 className="spin" size={24}/> Loading run details…</div>:error?<div className="error" role="alert">{error}</div>:!run?<div className="detail-empty"><div className="empty-icon"><GitBranch size={26}/></div><h3>A closer look at every run</h3><p>Select a pipeline run to see its release details, failure evidence, and suggested next steps.</p></div>:<>
       <div className="detail-title"><Badge run={run}/><h2>{run.name || 'Workflow run'}</h2><p>Run #{run.run_id} <span>·</span> Attempt {run.run_attempt}</p></div>
       <dl className="metadata"><div><dt>Repository</dt><dd>{run.repository}</dd></div><div><dt>Branch</dt><dd><GitBranch size={13}/>{run.head_branch || '—'}</dd></div><div><dt>Commit</dt><dd><code>{run.head_sha?.slice(0,12)||'—'}</code></dd></div><div><dt>Recorded</dt><dd>{when(run.received_at)}</dd></div></dl>
+      <Benchmark run={run}/>
       <section className="diagnosis"><div className="section-label"><Sparkles size={16}/><h3>Failure diagnosis</h3>{run.analysis_source&&<span className={`source ${run.analysis_source==='bedrock'?'ai':''}`}>{diagnosisLabel(run)}</span>}</div>
         {!isFailed(run)?<div className="success-note"><CheckCircle2 size={20}/><div><strong>No failure to investigate</strong><p>This run did not require failure analysis.</p></div></div>:run.diagnosis?<>
           {run.analysis_source==='rules'&&<div className="rules-note"><ShieldCheck size={15}/><span>Rules-based finding. {run.ai_error_code==='ThrottlingException'?'Bedrock is currently quota-limited.':'AI analysis was unavailable for this run.'}</span></div>}

@@ -12,3 +12,6 @@ dist/
 *.tfstate.*
 *.tfplan
 *.pem
+
+# Generated benchmark runs are downloadable GitHub artifacts.
+evaluation/results/

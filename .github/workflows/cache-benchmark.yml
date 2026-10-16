@@ -1,0 +1,29 @@
+name: DeployIQ Cache Benchmark
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deployiq-cache-benchmark
+  cancel-in-progress: false
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No setup-python cache: the experiment controls its own isolated cache.
+      - name: Measure baseline, cold cache, and warm cache
+        run: python evaluation/benchmark.py --output evaluation/results/cache-benchmark.json
+      - name: Save raw measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evaluation/results/cache-benchmark.json
+            evaluation/results/cache-benchmark.md
+          if-no-files-found: error
+          retention-days: 14

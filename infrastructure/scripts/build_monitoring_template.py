@@ -136,7 +136,7 @@ def build():
             "StartingPosition": "LATEST", "BatchSize": 1, "MaximumRetryAttempts": 2,
             "MaximumRecordAgeInSeconds": 3600,
             "DestinationConfig": {"OnFailure": {"Destination": arn("AnalysisDeadLetterQueue")}},
-            "FilterCriteria": {"Filters": [{"Pattern": json.dumps({"eventName": ["INSERT"], "dynamodb": {"NewImage": {"conclusion": {"S": ["failure", "timed_out"]}}}})}]},
+            "FilterCriteria": {"Filters": [{"Pattern": json.dumps({"eventName": ["INSERT"], "dynamodb": {"NewImage": {"conclusion": {"S": ["failure", "timed_out"]}}}})}, {"Pattern": json.dumps({"eventName": ["INSERT"], "dynamodb": {"NewImage": {"conclusion": {"S": ["success"]}, "name": {"S": ["DeployIQ Cache Benchmark"]}}}})}]},
         },
     }
     template["Outputs"]["AnalysisFunctionName"] = {"Value": ref("AnalysisFunction")}

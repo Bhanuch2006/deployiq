@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 _table = None
 SUMMARY_FIELDS = ["run_key", "repository", "run_id", "run_attempt", "name", "conclusion", "head_sha", "head_branch", "html_url", "received_at", "created_at", "run_started_at", "updated_at", "analysis_status", "analysis_source"]
-DETAIL_FIELDS = SUMMARY_FIELDS + ["diagnosis", "sanitized_log_excerpt", "fix_verification", "analysis_completed_at", "analysis_error_code", "ai_error_code", "model_id", "token_usage"]
+DETAIL_FIELDS = SUMMARY_FIELDS + ["diagnosis", "sanitized_log_excerpt", "fix_verification", "analysis_completed_at", "analysis_error_code", "ai_error_code", "model_id", "token_usage", "benchmark", "benchmark_status", "benchmark_error_code"]
 
 
 def table():

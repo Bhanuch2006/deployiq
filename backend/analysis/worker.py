@@ -1,6 +1,10 @@
 """Analyze completed failed workflow attempts from DynamoDB Streams."""
 from datetime import datetime, timezone
 import hashlib
+import io
+from decimal import Decimal
+import statistics
+import zipfile
 import json
 import logging
 import os
@@ -181,6 +185,9 @@ def analyze_record(record, table, secrets, bedrock):
     repository = os.environ["ALLOWED_REPOSITORY"]
     if item.get("repository") != repository or str(item.get("repository_id")) != os.environ["ALLOWED_REPOSITORY_ID"]:
         return
+    if item.get("conclusion") == "success" and item.get("name") == "DeployIQ Cache Benchmark":
+        import_benchmark(item, table, secrets)
+        return
     if item.get("conclusion") not in {"failure", "timed_out"}:
         return
     if item.get("analysis_status") == "completed":
@@ -220,6 +227,88 @@ def analyze_record(record, table, secrets, bedrock):
         table.update_item(Key={"run_key": key}, UpdateExpression="SET analysis_status = :status, analysis_error_code = :error REMOVE analysis_lock_until", ExpressionAttributeValues={":status": "failed", ":error": code})
         raise SafeFailure(code) from None
 
+
+
+def artifact_archive(path, token):
+    opener = urllib.request.build_opener(NoRedirect())
+    try:
+        result = opener.open(api_request(path, token), timeout=15)
+    except urllib.error.HTTPError as error:
+        if error.code != 302:
+            raise
+        location = error.headers.get("Location", "")
+        error.close()
+        parsed = urllib.parse.urlsplit(location)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise SafeFailure("invalid_artifact_download_url") from None
+        result = urllib.request.urlopen(urllib.request.Request(location), timeout=15)
+    with result:
+        raw = result.read(MAX_LOG_BYTES + 1)
+    if len(raw) > MAX_LOG_BYTES:
+        raise SafeFailure("benchmark_archive_too_large")
+    return raw
+
+
+def validate_benchmark(report, item):
+    if not isinstance(report, dict) or type(report.get("schema_version")) is not int or report["schema_version"] != 1 or report.get("metric") != "pip_install_seconds":
+        raise SafeFailure("invalid_benchmark_schema")
+    if report.get("repository") != item["repository"] or str(report.get("run_id")) != str(item["run_id"]) or str(report.get("run_attempt")) != str(item["run_attempt"]) or report.get("head_sha") != item.get("head_sha"):
+        raise SafeFailure("benchmark_identity_mismatch")
+    samples = report.get("samples")
+    if not isinstance(samples, list) or len(samples) != 8:
+        raise SafeFailure("benchmark_requires_eight_samples")
+    seen = set()
+    clean = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise SafeFailure("invalid_benchmark_sample")
+        variant, round_index, value = sample.get("variant"), sample.get("round"), sample.get("install_seconds")
+        if variant not in {"baseline", "cached"} or type(round_index) is not int or round_index not in range(1, 5) or (variant, round_index) in seen:
+            raise SafeFailure("invalid_benchmark_sample")
+        seen.add((variant, round_index))
+        if isinstance(value, bool) or not isinstance(value, (int, Decimal)) or not Decimal(value).is_finite() or not 0 < value < 180:
+            raise SafeFailure("invalid_benchmark_duration")
+        state = "disabled" if variant == "baseline" else "cold" if round_index == 1 else "warm"
+        if sample.get("cache_state") != state:
+            raise SafeFailure("invalid_benchmark_cache_state")
+        clean.append({"variant": variant, "round": round_index, "install_seconds": Decimal(value), "cache_state": state})
+    baseline = statistics.median([s["install_seconds"] for s in clean if s["variant"] == "baseline"])
+    warm = statistics.median([s["install_seconds"] for s in clean if s["cache_state"] == "warm"])
+    cold = next(s["install_seconds"] for s in clean if s["cache_state"] == "cold")
+    result = {"metric": "pip_install_seconds", "samples": clean, "summary": {"baseline_median_seconds": round(baseline, 4), "warm_median_seconds": round(warm, 4), "cold_seconds": cold, "improvement_percent": round((baseline - warm) / baseline * 100, 2), "baseline_samples": 4, "warm_samples": 3}}
+    for key in ["python", "platform", "requirements_sha256", "measured_at", "scope"]:
+        value = report.get(key)
+        if not isinstance(value, str) or len(value) > 500:
+            raise SafeFailure("invalid_benchmark_metadata")
+        result[key] = value
+    return result
+
+
+def import_benchmark(item, table, secrets):
+    if item.get("benchmark_status") == "completed":
+        return
+    try:
+        token = secrets.get_secret_value(SecretId=os.environ["GITHUB_TOKEN_SECRET_ARN"])["SecretString"].strip()
+        repo, run_id, attempt = item["repository"], int(item["run_id"]), int(item["run_attempt"])
+        data = github_json(f"/repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100", token)
+        expected = f"cache-benchmark-{run_id}-{attempt}"
+        artifact = next((a for a in data.get("artifacts", []) if a.get("name") == expected and not a.get("expired")), None)
+        if not artifact or type(artifact.get("id")) is not int:
+            raise SafeFailure("benchmark_artifact_not_available")
+        if artifact.get("workflow_run", {}).get("head_sha") != item.get("head_sha"):
+            raise SafeFailure("benchmark_artifact_commit_mismatch")
+        raw = artifact_archive(f"/repos/{repo}/actions/artifacts/{artifact['id']}/zip", token)
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            info = archive.getinfo("cache-benchmark.json")
+            if info.file_size > 65536:
+                raise SafeFailure("benchmark_report_too_large")
+            report = json.loads(archive.read(info), parse_float=Decimal)
+        report = validate_benchmark(report, item)
+        table.update_item(Key={"run_key": item["run_key"]}, UpdateExpression="SET benchmark = :report, benchmark_status = :status REMOVE benchmark_error_code", ExpressionAttributeValues={":report": report, ":status": "completed"})
+    except Exception as error:
+        code = error_code(error)
+        table.update_item(Key={"run_key": item["run_key"]}, UpdateExpression="SET benchmark_status = :status, benchmark_error_code = :error", ExpressionAttributeValues={":status": "failed", ":error": code})
+        raise SafeFailure(code) from None
 
 def handler(event, context):
     import boto3
