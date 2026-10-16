@@ -1,0 +1,25 @@
+name: DeployIQ Diagnosis Demo
+on:
+  workflow_dispatch:
+    inputs:
+      install_dependency:
+        description: Install the missing dependency to demonstrate the fix
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  dependency-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create an isolated environment
+        run: python -m venv .demo-venv
+      - name: Apply the reviewed dependency fix
+        if: inputs.install_dependency
+        run: .demo-venv/bin/python -m pip install 'requests>=2.32,<3'
+      - name: Import the dependency
+        run: .demo-venv/bin/python -c 'import requests; print("Dependency check passed")'

@@ -6,7 +6,10 @@ AI-assisted DevOps pipeline monitoring and optimization on AWS.
 
 Implemented: FastAPI sample service, health endpoint, release-version endpoint,
 pytest checks, non-root Docker image, and GitHub Actions tests plus container smoke check.
-The dashboard, AWS resources, GitHub ingestion, and AI analyzer are future milestones.
+The sample app deploys to EC2. Signed GitHub run ingestion is implemented in
+backend/webhooks/handler.py, with a deployable CloudFormation stack.
+Failure-analysis code and stack resources are implemented; see the setup guide
+to enable them in AWS. The dashboard is a future milestone.
 No AWS resources are created by this starter.
 
 ### Run locally (Linux)
@@ -84,3 +87,20 @@ It restricts access to this repository and main branch using their numeric IDs.
 
 Keep credentials out of Git. The planning target is $60 total AWS spend;
 alerts are not spending caps. No real performance improvements have been measured yet.
+
+## Monitoring backend
+
+See [monitoring setup](infrastructure/MONITORING_SETUP.md) to deploy
+`infrastructure/monitoring-stack.json` through CloudFormation. This creates
+API Gateway → signature-verifying Lambda → DynamoDB. Completed workflow
+attempts are stored once, with repository name and numeric ID checks.
+The infrastructure is prepared locally and must be deployed separately.
+
+## Failure analysis
+
+Follow [analysis setup](infrastructure/ANALYSIS_SETUP.md) to configure the
+read-only GitHub token and update the existing monitoring stack. DynamoDB Streams
+triggers failed-run analysis asynchronously. Bedrock diagnoses must quote actual
+log evidence; a rules fallback is labeled explicitly. AI is capped at 10 attempts
+per UTC day, and fixes remain unverified until a human checks a new CI run.
+The manual DeployIQ Diagnosis Demo workflow provides a repeatable failure/fix.
