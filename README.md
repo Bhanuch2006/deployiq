@@ -9,7 +9,8 @@ pytest checks, non-root Docker image, and GitHub Actions tests plus container sm
 The sample app deploys to EC2. Signed GitHub run ingestion is implemented in
 backend/webhooks/handler.py, with a deployable CloudFormation stack.
 Failure-analysis code and stack resources are implemented; see the setup guide
-to enable them in AWS. The dashboard is a future milestone.
+to enable them in AWS. The React dashboard and authenticated read API are implemented; deployment
+and login setup are described below.
 No AWS resources are created by this starter.
 
 ### Run locally (Linux)
@@ -104,3 +105,20 @@ triggers failed-run analysis asynchronously. Bedrock diagnoses must quote actual
 log evidence; a rules fallback is labeled explicitly. AI is capped at 10 attempts
 per UTC day, and fixes remain unverified until a human checks a new CI run.
 The manual DeployIQ Diagnosis Demo workflow provides a repeatable failure/fix.
+
+## Dashboard
+
+The React frontend in frontend/ shows real run history and failure details.
+Follow [dashboard setup](infrastructure/DASHBOARD_SETUP.md) to update the monitoring
+stack, create a Cognito team login, and run the interface locally. Its read-only
+API requires a verified ID token; public signup is disabled. All invited team
+users share this one repository. AWS hosting resources and a separate dashboard publishing workflow are prepared;
+follow the hosting setup guide to enable them.
+
+## AWS dashboard hosting
+
+Follow [hosting setup](infrastructure/HOSTING_SETUP.md) to update the existing
+stack with private S3 and CloudFront HTTPS delivery. Set the five GitHub repository
+variables from stack Outputs, then run DeployIQ Dashboard. Main-branch frontend
+changes publish automatically. Authentication and pipeline data stay on the
+existing Cognito/API/Lambda/DynamoDB backend.

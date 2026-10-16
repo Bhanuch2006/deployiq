@@ -22,6 +22,11 @@
       "Type": "String",
       "Description": "ARN of an existing Secrets Manager secret whose plaintext is a fine-grained GitHub token with Actions read access to this repository.",
       "AllowedPattern": "arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:.+"
+    },
+    "DashboardOrigin": {
+      "Type": "String",
+      "Default": "http://127.0.0.1:5173",
+      "Description": "Exact frontend browser origin. Keep the default for local development."
     }
   },
   "Resources": {
@@ -36,6 +41,14 @@
           {
             "AttributeName": "run_key",
             "AttributeType": "S"
+          },
+          {
+            "AttributeName": "repository",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "received_at",
+            "AttributeType": "S"
           }
         ],
         "KeySchema": [
@@ -49,7 +62,39 @@
         },
         "StreamSpecification": {
           "StreamViewType": "NEW_IMAGE"
-        }
+        },
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "RepositoryReceivedIndex",
+            "KeySchema": [
+              {
+                "AttributeName": "repository",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "received_at",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "INCLUDE",
+              "NonKeyAttributes": [
+                "run_id",
+                "run_attempt",
+                "name",
+                "conclusion",
+                "head_sha",
+                "head_branch",
+                "html_url",
+                "created_at",
+                "run_started_at",
+                "updated_at",
+                "analysis_status",
+                "analysis_source"
+              ]
+            }
+          }
+        ]
       }
     },
     "WebhookLogs": {
@@ -152,7 +197,27 @@
         "Name": {
           "Fn::Sub": "${AWS::StackName}-api"
         },
-        "ProtocolType": "HTTP"
+        "ProtocolType": "HTTP",
+        "CorsConfiguration": {
+          "AllowOrigins": [
+            {
+              "Ref": "DashboardOrigin"
+            },
+            {
+              "Fn::Sub": "https://${DashboardDistribution.DomainName}"
+            }
+          ],
+          "AllowMethods": [
+            "GET",
+            "POST",
+            "OPTIONS"
+          ],
+          "AllowHeaders": [
+            "authorization",
+            "content-type"
+          ],
+          "MaxAge": 300
+        }
       }
     },
     "WebhookIntegration": {
@@ -405,6 +470,516 @@
           ]
         }
       }
+    },
+    "DashboardUsers": {
+      "Type": "AWS::Cognito::UserPool",
+      "Properties": {
+        "UserPoolName": {
+          "Fn::Sub": "${AWS::StackName}-team"
+        },
+        "UserPoolTier": "LITE",
+        "AdminCreateUserConfig": {
+          "AllowAdminCreateUserOnly": true
+        },
+        "UsernameConfiguration": {
+          "CaseSensitive": false
+        },
+        "Policies": {
+          "PasswordPolicy": {
+            "MinimumLength": 12,
+            "RequireLowercase": true,
+            "RequireUppercase": true,
+            "RequireNumbers": true,
+            "RequireSymbols": true,
+            "TemporaryPasswordValidityDays": 7
+          }
+        },
+        "MfaConfiguration": "OFF"
+      }
+    },
+    "DashboardClient": {
+      "Type": "AWS::Cognito::UserPoolClient",
+      "Properties": {
+        "UserPoolId": {
+          "Ref": "DashboardUsers"
+        },
+        "ClientName": "deployiq-dashboard",
+        "GenerateSecret": false,
+        "ExplicitAuthFlows": [
+          "ALLOW_USER_PASSWORD_AUTH",
+          "ALLOW_REFRESH_TOKEN_AUTH"
+        ],
+        "PreventUserExistenceErrors": "ENABLED",
+        "IdTokenValidity": 30,
+        "AccessTokenValidity": 30,
+        "TokenValidityUnits": {
+          "IdToken": "minutes",
+          "AccessToken": "minutes"
+        }
+      }
+    },
+    "DashboardAuthorizer": {
+      "Type": "AWS::ApiGatewayV2::Authorizer",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebhookApi"
+        },
+        "AuthorizerType": "JWT",
+        "Name": "DeployIQTeam",
+        "IdentitySource": [
+          "$request.header.Authorization"
+        ],
+        "JwtConfiguration": {
+          "Audience": [
+            {
+              "Ref": "DashboardClient"
+            }
+          ],
+          "Issuer": {
+            "Fn::Sub": "https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${DashboardUsers}"
+          }
+        }
+      }
+    },
+    "DashboardLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-dashboard"
+        },
+        "RetentionInDays": 7
+      }
+    },
+    "DashboardRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ReadPipelineHistory",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:Query",
+                  "Resource": {
+                    "Fn::Sub": "${RunsTable.Arn}/index/RepositoryReceivedIndex"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "RunsTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-dashboard:*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DashboardFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "DashboardLogs",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-dashboard"
+        },
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "DashboardRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 10,
+        "MemorySize": 128,
+        "Environment": {
+          "Variables": {
+            "RUNS_TABLE": {
+              "Ref": "RunsTable"
+            },
+            "ALLOWED_REPOSITORY": {
+              "Ref": "AllowedRepository"
+            },
+            "ALLOWED_REPOSITORY_ID": {
+              "Ref": "AllowedRepositoryId"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "\"\"\"Read-only dashboard API. API Gateway validates Cognito JWTs before invocation.\"\"\"\nimport base64\nfrom decimal import Decimal\nimport json\nimport logging\nimport os\nimport re\n\nlogger = logging.getLogger(__name__)\nlogger.setLevel(logging.INFO)\n_table = None\nSUMMARY_FIELDS = [\"run_key\", \"repository\", \"run_id\", \"run_attempt\", \"name\", \"conclusion\", \"head_sha\", \"head_branch\", \"html_url\", \"received_at\", \"created_at\", \"run_started_at\", \"updated_at\", \"analysis_status\", \"analysis_source\"]\nDETAIL_FIELDS = SUMMARY_FIELDS + [\"diagnosis\", \"sanitized_log_excerpt\", \"fix_verification\", \"analysis_completed_at\", \"analysis_error_code\", \"ai_error_code\", \"model_id\", \"token_usage\"]\n\n\ndef table():\n    global _table\n    if _table is None:\n        import boto3\n        from botocore.config import Config\n        _table = boto3.resource(\"dynamodb\", config=Config(connect_timeout=2, read_timeout=3, retries={\"total_max_attempts\": 2})).Table(os.environ[\"RUNS_TABLE\"])\n    return _table\n\n\ndef json_number(value):\n    if isinstance(value, Decimal):\n        return int(value) if value == value.to_integral_value() else float(value)\n    raise TypeError(\"Unsupported JSON value\")\n\n\ndef response(code, body):\n    return {\"statusCode\": code, \"headers\": {\"content-type\": \"application/json\", \"cache-control\": \"no-store\"}, \"body\": json.dumps(body, default=json_number)}\n\n\ndef select(item, fields):\n    return {key: item[key] for key in fields if key in item}\n\n\ndef encode_cursor(key):\n    return base64.urlsafe_b64encode(json.dumps(key, default=json_number).encode()).decode()\n\n\ndef decode_cursor(value, repository):\n    if not isinstance(value, str) or len(value) > 2048:\n        raise ValueError(\"Invalid cursor\")\n    try:\n        key = json.loads(base64.b64decode(value, altchars=b\"-_\", validate=True))\n    except Exception:\n        raise ValueError(\"Invalid cursor\") from None\n    if not isinstance(key, dict) or set(key) != {\"run_key\", \"repository\", \"received_at\"}:\n        raise ValueError(\"Invalid cursor\")\n    if key[\"repository\"] != repository or not all(isinstance(v, str) and len(v) <= 512 for v in key.values()):\n        raise ValueError(\"Invalid cursor\")\n    if not key[\"run_key\"].startswith(repository + \"#\"):\n        raise ValueError(\"Invalid cursor\")\n    return key\n\n\ndef handler(event, context):\n    claims = event.get(\"requestContext\", {}).get(\"authorizer\", {}).get(\"jwt\", {}).get(\"claims\", {})\n    # Defense in depth: no anonymous reads even if Lambda is invoked without the gateway.\n    if not claims.get(\"sub\") or claims.get(\"token_use\") != \"id\":\n        return response(401, {\"message\": \"Sign in to access pipeline history\"})\n    repository = os.environ[\"ALLOWED_REPOSITORY\"]\n    try:\n        if event.get(\"routeKey\") == \"GET /runs\":\n            query = event.get(\"queryStringParameters\") or {}\n            try:\n                limit = int(query.get(\"limit\", \"25\"))\n            except (ValueError, TypeError):\n                raise ValueError(\"Limit must be between 1 and 50\") from None\n            if not 1 <= limit <= 50:\n                raise ValueError(\"Limit must be between 1 and 50\")\n            options = {\"IndexName\": \"RepositoryReceivedIndex\", \"KeyConditionExpression\": \"repository = :repo\", \"ExpressionAttributeValues\": {\":repo\": repository}, \"ScanIndexForward\": False, \"Limit\": limit}\n            if query.get(\"cursor\"):\n                options[\"ExclusiveStartKey\"] = decode_cursor(query[\"cursor\"], repository)\n            result = table().query(**options)\n            return response(200, {\"repository\": repository, \"runs\": [select(item, SUMMARY_FIELDS) for item in result.get(\"Items\", [])], \"next_cursor\": encode_cursor(result[\"LastEvaluatedKey\"]) if result.get(\"LastEvaluatedKey\") else None})\n        if event.get(\"routeKey\") == \"GET /runs/{runId}/attempts/{attempt}\":\n            params = event.get(\"pathParameters\") or {}\n            run_id = params.get(\"runId\", \"\")\n            attempt = params.get(\"attempt\", \"\")\n            if not re.fullmatch(r\"[1-9][0-9]{0,19}\", run_id) or not re.fullmatch(r\"[1-9][0-9]{0,5}\", attempt):\n                raise ValueError(\"Invalid run identity\")\n            item = table().get_item(Key={\"run_key\": f\"{repository}#{run_id}#{attempt}\"}, ConsistentRead=True).get(\"Item\")\n            if not item or item.get(\"repository\") != repository or str(item.get(\"repository_id\")) != os.environ[\"ALLOWED_REPOSITORY_ID\"]:\n                return response(404, {\"message\": \"Run not found\"})\n            return response(200, {\"run\": select(item, DETAIL_FIELDS)})\n        return response(404, {\"message\": \"Route not found\"})\n    except ValueError as error:\n        return response(400, {\"message\": str(error)})\n    except Exception:\n        logger.error(\"Dashboard read failed\")\n        return response(503, {\"message\": \"Pipeline history is temporarily unavailable. Try again shortly.\"})\n"
+        }
+      }
+    },
+    "DashboardIntegration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebhookApi"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "DashboardFunction",
+            "Arn"
+          ]
+        },
+        "PayloadFormatVersion": "2.0"
+      }
+    },
+    "DashboardListRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebhookApi"
+        },
+        "RouteKey": "GET /runs",
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "DashboardAuthorizer"
+        },
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "DashboardIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "DashboardDetailRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebhookApi"
+        },
+        "RouteKey": "GET /runs/{runId}/attempts/{attempt}",
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "DashboardAuthorizer"
+        },
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "DashboardIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "AllowDashboardInvoke": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "DashboardFunction"
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceAccount": {
+          "Ref": "AWS::AccountId"
+        },
+        "SourceArn": {
+          "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebhookApi}/*/GET/runs*"
+        }
+      }
+    },
+    "DashboardBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "IgnorePublicAcls": true,
+          "BlockPublicPolicy": true,
+          "RestrictPublicBuckets": true
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DashboardOriginAccess": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-dashboard"
+          },
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "DashboardCachePolicy": {
+      "Type": "AWS::CloudFront::CachePolicy",
+      "Properties": {
+        "CachePolicyConfig": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-dashboard-cache"
+          },
+          "MinTTL": 0,
+          "DefaultTTL": 60,
+          "MaxTTL": 31536000,
+          "ParametersInCacheKeyAndForwardedToOrigin": {
+            "EnableAcceptEncodingGzip": true,
+            "EnableAcceptEncodingBrotli": true,
+            "CookiesConfig": {
+              "CookieBehavior": "none"
+            },
+            "HeadersConfig": {
+              "HeaderBehavior": "none"
+            },
+            "QueryStringsConfig": {
+              "QueryStringBehavior": "none"
+            }
+          }
+        }
+      }
+    },
+    "DashboardResponseHeaders": {
+      "Type": "AWS::CloudFront::ResponseHeadersPolicy",
+      "Properties": {
+        "ResponseHeadersPolicyConfig": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-dashboard-security"
+          },
+          "SecurityHeadersConfig": {
+            "ContentTypeOptions": {
+              "Override": true
+            },
+            "FrameOptions": {
+              "FrameOption": "DENY",
+              "Override": true
+            },
+            "ReferrerPolicy": {
+              "ReferrerPolicy": "strict-origin-when-cross-origin",
+              "Override": true
+            },
+            "StrictTransportSecurity": {
+              "AccessControlMaxAgeSec": 31536000,
+              "Override": true
+            },
+            "ContentSecurityPolicy": {
+              "Override": true,
+              "ContentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.execute-api.us-east-1.amazonaws.com https://cognito-idp.us-east-1.amazonaws.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests"
+            }
+          }
+        }
+      }
+    },
+    "DashboardDistribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Enabled": true,
+          "Comment": "DeployIQ dashboard",
+          "DefaultRootObject": "index.html",
+          "HttpVersion": "http2",
+          "PriceClass": "PriceClass_100",
+          "Origins": [
+            {
+              "Id": "DashboardS3",
+              "DomainName": {
+                "Fn::GetAtt": [
+                  "DashboardBucket",
+                  "RegionalDomainName"
+                ]
+              },
+              "OriginAccessControlId": {
+                "Ref": "DashboardOriginAccess"
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "DashboardS3",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": [
+              "GET",
+              "HEAD"
+            ],
+            "CachedMethods": [
+              "GET",
+              "HEAD"
+            ],
+            "Compress": true,
+            "CachePolicyId": {
+              "Ref": "DashboardCachePolicy"
+            },
+            "ResponseHeadersPolicyId": {
+              "Ref": "DashboardResponseHeaders"
+            }
+          },
+          "ViewerCertificate": {
+            "CloudFrontDefaultCertificate": true
+          }
+        }
+      }
+    },
+    "DashboardBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "DashboardBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowOnlyThisCloudFrontOrigin",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudfront.amazonaws.com"
+              },
+              "Action": "s3:GetObject",
+              "Resource": {
+                "Fn::Sub": "${DashboardBucket.Arn}/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DashboardBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${DashboardBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DashboardPublishRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:Bhanuch2006@182192635/deployiq@1421278672:ref:refs/heads/main"
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PublishDashboard",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "DashboardBucket",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "${DashboardBucket.Arn}/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "cloudfront:CreateInvalidation",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
     }
   },
   "Outputs": {
@@ -431,6 +1006,44 @@
     "AnalysisDeadLetterQueueUrl": {
       "Value": {
         "Ref": "AnalysisDeadLetterQueue"
+      }
+    },
+    "DashboardApiUrl": {
+      "Value": {
+        "Fn::Sub": "https://${WebhookApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+      }
+    },
+    "DashboardUserPoolId": {
+      "Value": {
+        "Ref": "DashboardUsers"
+      }
+    },
+    "DashboardClientId": {
+      "Value": {
+        "Ref": "DashboardClient"
+      }
+    },
+    "DashboardUrl": {
+      "Value": {
+        "Fn::Sub": "https://${DashboardDistribution.DomainName}"
+      }
+    },
+    "DashboardBucketName": {
+      "Value": {
+        "Ref": "DashboardBucket"
+      }
+    },
+    "DashboardDistributionId": {
+      "Value": {
+        "Ref": "DashboardDistribution"
+      }
+    },
+    "DashboardPublishRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DashboardPublishRole",
+          "Arn"
+        ]
       }
     }
   }

@@ -1,6 +1,8 @@
 """Build a single uploadable CloudFormation template from the webhook source."""
 import argparse
 import json
+from dashboard_resources import add_dashboard
+from hosting_resources import add_hosting
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -139,6 +141,8 @@ def build():
     }
     template["Outputs"]["AnalysisFunctionName"] = {"Value": ref("AnalysisFunction")}
     template["Outputs"]["AnalysisDeadLetterQueueUrl"] = {"Value": ref("AnalysisDeadLetterQueue")}
+    add_dashboard(template)
+    add_hosting(template)
     return template
 
 

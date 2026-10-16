@@ -1,0 +1,58 @@
+name: DeployIQ Dashboard
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'infrastructure/scripts/publish_dashboard.sh'
+      - '.github/workflows/dashboard.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dashboard-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && vars.DASHBOARD_BUCKET_NAME != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DASHBOARD_BUCKET_NAME: ${{ vars.DASHBOARD_BUCKET_NAME }}
+      DASHBOARD_DISTRIBUTION_ID: ${{ vars.DASHBOARD_DISTRIBUTION_ID }}
+      DASHBOARD_PUBLISH_ROLE_ARN: ${{ vars.DASHBOARD_PUBLISH_ROLE_ARN }}
+      VITE_API_BASE_URL: ${{ vars.DASHBOARD_API_URL }}
+      VITE_COGNITO_CLIENT_ID: ${{ vars.DASHBOARD_CLIENT_ID }}
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check hosting configuration
+        run: |
+          for name in DASHBOARD_BUCKET_NAME DASHBOARD_DISTRIBUTION_ID DASHBOARD_PUBLISH_ROLE_ARN VITE_API_BASE_URL VITE_COGNITO_CLIENT_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub repository variable for $name. See infrastructure/HOSTING_SETUP.md."
+              exit 1
+            fi
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Authenticate to AWS using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.DASHBOARD_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          allowed-account-ids: '360582629770'
+      - name: Publish dashboard and refresh CloudFront
+        run: bash infrastructure/scripts/publish_dashboard.sh

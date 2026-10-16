@@ -37,11 +37,27 @@ jobs:
       - run: python -m pip install -r backend/requirements-dev.txt
       - run: python -m unittest discover -s backend/tests -v
       - run: python infrastructure/scripts/build_monitoring_template.py --check
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
   docker-build:
     permissions:
       contents: read
       id-token: write
-    needs: [test, backend-test]
+    needs: [test, backend-test, frontend-build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
