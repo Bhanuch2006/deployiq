@@ -1,14 +1,19 @@
 # Measured cache experiment
 
 This is a repeatable pip-cache experiment, not an assertion that caching always
-improves whole-pipeline time. No benchmark results are shipped with the code.
+improves whole-pipeline time. Historical observed results are documented in the
+[root README](../README.md); raw reports are workflow artifacts and validated
+dashboard data.
 
 ## Enable and run
 
 1. Update the existing deployiq-monitoring CloudFormation stack with the latest
    infrastructure/monitoring-stack.json. Preserve ALL existing parameters. This
    updates the analyzer to import successful benchmark artifacts and the read API
-   to return benchmark details. No additional IAM permissions or secrets are needed.
+   to return benchmark details. Benchmark import itself needs no additional
+   secrets. The current combined template also configures Groq diagnosis and
+   requires GroqApiKeySecretArn; see the
+   [analysis guide](../infrastructure/ANALYSIS_SETUP.md) if migrating an older stack.
 2. After UPDATE_COMPLETE, commit and push the changed files (evaluation/, backend/,
    frontend/, infrastructure/, .github/workflows/, README.md, and .gitignore).
 3. Wait for DeployIQ CI and DeployIQ Dashboard to pass. The latter publishes the
@@ -51,7 +56,7 @@ The completed workflow event inserts its usual run row in DynamoDB. A stream
 filter also sends successful runs named DeployIQ Cache Benchmark to the worker.
 The worker downloads ONLY the artifact for that exact run attempt, validates
 repository/commit/run identity and sample shape, recomputes the medians, then
-stores a benchmark map on the run. It does not invoke Bedrock or consume the AI
+stores a benchmark map on the run. It does not invoke an AI provider or consume the AI
 call allowance. Existing signed webhook validation, Cognito login, and API
 repository restrictions still apply.
 
@@ -73,7 +78,7 @@ The dashboard contains no invented duration or improvement numbers.
 - Artifact delivery can be delayed. The stream retries are bounded. After fixing
   a failure, rerun the benchmark or manually invoke the worker with the existing
   row key, as described in infrastructure/ANALYSIS_SETUP.md.
-- Bedrock's current zero quota does not prevent benchmark import.
+- AI-provider quota limits do not prevent benchmark import.
 
 Local unit checks do not install packages or generate performance claims:
 

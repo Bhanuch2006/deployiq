@@ -1,133 +1,207 @@
 # DeployIQ
 
-AI-assisted DevOps pipeline monitoring and optimization on AWS.
+AI-assisted monitoring, failure diagnosis, and measured dependency-cache experiments
+for a GitHub Actions pipeline. AWS hosts the application, event processing,
+authentication, storage, and dashboard; Groq supplies AI inference.
 
-## Milestone 1: sample application and CI
+[Open the dashboard](https://d27iom2n4u9pw.cloudfront.net/) ·
+[Faculty demo script](docs/DEMO.md) · [Cache experiment method](evaluation/README.md)
 
-Implemented: FastAPI sample service, health endpoint, release-version endpoint,
-pytest checks, non-root Docker image, and GitHub Actions tests plus container smoke check.
-The sample app deploys to EC2. Signed GitHub run ingestion is implemented in
-backend/webhooks/handler.py, with a deployable CloudFormation stack.
-Failure-analysis code and stack resources are implemented; see the setup guide
-to enable them in AWS. The React dashboard and authenticated read API are implemented; deployment
-and login setup are described below.
-No AWS resources are created by this starter.
+The dashboard requires an invited Cognito team login. Its public URL does not
+provide public access to pipeline data.
 
-### Run locally (Linux)
+## What the project does
 
-Python 3.12 is the CI and container target; Python 3.12 or newer is suitable for local setup.
+- Tests a FastAPI service, builds and smoke-tests its Docker image, then publishes
+  an immutable release to private Amazon ECR.
+- Deploys main-branch releases to EC2 through AWS Systems Manager using GitHub
+  OIDC. A candidate health check precedes the container swap; a failed replacement
+  attempts to restore the previous container and fails the deployment job.
+- Verifies signed GitHub workflow-run webhooks and stores completed attempts once
+  in DynamoDB, scoped to the configured repository name and numeric ID.
+- Analyzes failed-job logs asynchronously. Groq returns a likely cause, exact log
+  evidence, a suggested fix, and verification steps. Invalid or unavailable AI
+  output produces an explicitly labeled Rules fallback.
+- Shows real run history and diagnosis through an authenticated React dashboard.
+- Imports successful cache-benchmark artifacts, validates their run identity, and
+  recomputes measured comparisons for display.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Dev[Developer push or manual workflow] --> Actions[GitHub Actions]
+    Actions --> Tests[Application and backend tests<br/>Frontend build and Docker smoke check]
+    Tests -->|Main release via OIDC| ECR[Private Amazon ECR]
+    Tests --> SSM[AWS Systems Manager]
+    ECR --> EC2[EC2 Docker service]
+    SSM --> EC2
+
+    Actions -->|Completed workflow_run event| Gateway[API Gateway webhook route]
+    Gateway --> Webhook[Lambda: verify HMAC signature<br/>Check repository identity and deduplicate]
+    Webhook --> DB[(DynamoDB runs)]
+    DB --> Streams[DynamoDB Streams INSERT filters]
+    Streams -->|Failed or timed out| Analyzer[Analyzer Lambda]
+    Analyzer -->|Read failed-job logs| GitHub[GitHub Actions API]
+    Secrets[AWS Secrets Manager<br/>GitHub read token and Groq API key] --> Analyzer
+    Analyzer --> Clean[Redact and bound log excerpt]
+    Clean --> Groq[Groq API<br/>openai/gpt-oss-120b]
+    Groq --> Validate[Validate exact evidence quotes<br/>Rules fallback on AI failure]
+    Validate --> DB
+    Streams -->|Successful cache benchmark| Importer[Benchmark importer in analyzer Lambda]
+    Importer -->|Read exact-run artifact| GitHub
+    Importer -->|Validate identity and recompute medians| DB
+
+    Browser[Team browser] --> CDN[CloudFront HTTPS]
+    S3[Private S3 dashboard assets] -->|Origin Access Control| CDN
+    Browser --> Cognito[Cognito team sign-in]
+    Cognito -->|ID token| Browser
+    Browser -->|Bearer ID token| ReadAPI[API Gateway JWT authorizer<br/>Read API Lambda]
+    ReadAPI --> DB
+```
+
+The webhook, diagnosis, and dashboard paths are separate from the sample service's
+EC2 deployment. The two stream branches share one analyzer Lambda. Successful
+ordinary runs do not call AI; successful benchmark runs import artifacts only.
+Groq receives sanitized excerpts outside AWS. The model never executes commands
+or applies a fix.
+
+## Demonstrated results
+
+These observations come from the project's captured GitHub Actions summaries and
+hosted dashboard. They are historical results, not a live availability guarantee.
+
+| Evidence | Observed result |
+| --- | --- |
+| [Diagnosis run 39475900064](https://github.com/Bhanuch2006/deployiq/actions/runs/39475900064) | Dashboard displayed **Groq AI**, the missing `requests` diagnosis, the exact `ModuleNotFoundError` quote, and suggested verification steps. |
+| [Cache run 38903048448](https://github.com/Bhanuch2006/deployiq/actions/runs/38903048448) | Baseline median **2.29 s**, warm-cache median **1.82 s**, cold fill **2.42 s**; warm installation **20.73% faster**. |
+| [Cache run 38908962867](https://github.com/Bhanuch2006/deployiq/actions/runs/38908962867) | Baseline median **2.90 s**, warm-cache median **2.77 s**, cold fill **3.58 s**; warm installation **4.30% faster**. |
+
+Each experiment uses four baseline installations, one cold-cache fill, and three
+warm-cache installations in fresh virtual environments. Percentages use the
+unrounded measurements; displayed medians are rounded. These measure **pip
+installation time only**, excluding remote GitHub cache restore/save, total build
+time, and deployment time. The varying results do not establish a guaranteed
+speedup. Keep both reports rather than selecting only the larger improvement.
+
+The intentional failure has been observed with Groq diagnosis. The current
+passing-fix rerun should be checked during rehearsal; it is not inferred from a
+suggested fix. See the [demo script](docs/DEMO.md) for the acceptance checks.
+
+## Run locally
+
+### Sample service
+
+Python 3.12 is the CI and container target. From the repository root:
 
 ```bash
 cd sample-app
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 uvicorn app:app --reload
 ```
 
-Open http://127.0.0.1:8000/health and http://127.0.0.1:8000/docs.
-Stop the server with Ctrl+C.
+Open [health](http://127.0.0.1:8000/health),
+[API docs](http://127.0.0.1:8000/docs), or `/` for the service and release version.
 
-### Run with Docker
-
-From the repository root, with a running Docker daemon accessible to your user:
+With Docker instead, from the repository root:
 
 ```bash
 docker build -t deployiq-sample ./sample-app
 docker run --rm -p 127.0.0.1:8000:8000 -e APP_VERSION=demo-001 deployiq-sample
 ```
 
-### Publish to GitHub
+### Dashboard
 
-Create an empty repository named `deployiq` on GitHub, then run from this folder:
+Use Node.js 22 (the CI version). In `frontend/`, copy `.env.example` to
+`.env.local` and fill `VITE_API_BASE_URL` and `VITE_COGNITO_CLIENT_ID` from stack
+Outputs. These are public configuration values, not secret credentials.
 
 ```bash
-git init
-git add .
-git commit -m "Initialize DeployIQ sample application and CI"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/deployiq.git
-git push -u origin main
+cd frontend
+npm ci
+npm run dev
 ```
 
-Replace YOUR_USERNAME. Check the repository's Actions tab for DeployIQ CI.
-It tests the application, builds the container, and checks its health endpoint.
-On main pushes or manual main runs, it also uploads the tested image to private ECR
-using GitHub OIDC and DeployIQGitHubECRRole. It then deploys that exact image to the existing EC2 demo server through Systems Manager.
-Attach infrastructure/github-deploy-policy.json to DeployIQGitHubECRRole before pushing.
-Deployment first checks a candidate on localhost:8001, then replaces the port-80
-container, with a brief interruption. A failed replacement attempts to restore the
-previous container and fails CI. The SSM runner reports remote success or failure.
-Concurrent workflow runs do not cancel an active deployment. Server-side locking
-also prevents overlapping container replacements. The instance must be running and
-online in Systems Manager. It is currently i-0e4717493127d0d23 in us-east-1.
-Each image tag includes the commit SHA, run ID, and attempt, so reruns work with
-immutable ECR tags. Pull requests and other branches do not upload images.
+Open the local URL printed by Vite and use an invited Cognito user's credentials.
+The deployed read API must allow that local origin. A browser reload requires
+sign-in again because the prototype keeps tokens in memory.
 
-The required role trust policy is in infrastructure/github-trust-policy.json.
-It restricts access to this repository and main branch using their numeric IDs.
+## Deploy and configure
 
-## Team modules
+Use the existing `deployiq-monitoring` stack in **us-east-1**. Committing source
+alone does not update Lambda code: regenerate and upload the CloudFormation
+template, retain existing parameter values, and supply the Groq secret ARN.
 
-| Folder | Responsibility |
+| Guide | Purpose |
 | --- | --- |
-| infrastructure/ and .github/workflows/ | Member 1: AWS, Docker, CI/CD |
-| ai-engine/ | Member 2: log diagnosis and optimization |
-| backend/ | Member 3: APIs, GitHub events, queue, storage |
-| frontend/ | Member 4: dashboard and analytics |
-| evaluation/ | Shared: measured before/after results |
+| [Monitoring setup](infrastructure/MONITORING_SETUP.md) | Signed webhook ingestion and repository restrictions. |
+| [Analysis setup](infrastructure/ANALYSIS_SETUP.md) | GitHub Actions read token, Groq secret, analyzer, and recovery. |
+| [Dashboard setup](infrastructure/DASHBOARD_SETUP.md) | Cognito users, authenticated read API, and local configuration. |
+| [Hosting setup](infrastructure/HOSTING_SETUP.md) | Private S3, CloudFront, and GitHub dashboard publishing variables. |
+| [Experiment guide](evaluation/README.md) | Benchmark execution, artifact import, and measurement limits. |
 
-## Next milestones
+After editing backend or infrastructure source:
 
-1. Push this starter and confirm both CI jobs pass.
-2. Confirm the AWS account expiration date, region, credits, and service access.
-3. Add infrastructure as code and secure GitHub OIDC deployment.
-4. Ingest signed GitHub workflow events, persist runs, and queue analysis.
-5. Add failure diagnosis, authentication, dashboard, and measured optimization.
+```bash
+python3 infrastructure/scripts/build_monitoring_template.py
+python3 infrastructure/scripts/build_monitoring_template.py --check
+```
 
-Keep credentials out of Git. The planning target is $60 total AWS spend;
-alerts are not spending caps. No real performance improvements have been measured yet.
+Store the Groq API key as plaintext in Secrets Manager under
+`deployiq/groq-api-key`; only its ARN belongs in `GroqApiKeySecretArn`.
+The GitHub log-reader token is a separate secret. Do not put either value in
+GitHub variables, frontend configuration, repository files, screenshots, or chat.
 
-## Monitoring backend
+Main-branch frontend changes publish through **DeployIQ Dashboard** when its five
+hosting variables are configured. Main releases through **DeployIQ CI** use a
+separate OIDC role and SSM deployment path. The EC2 instance must be online in
+Systems Manager, with its instance role able to pull the release from ECR.
 
-See [monitoring setup](infrastructure/MONITORING_SETUP.md) to deploy
-`infrastructure/monitoring-stack.json` through CloudFormation. This creates
-API Gateway → signature-verifying Lambda → DynamoDB. Completed workflow
-attempts are stored once, with repository name and numeric ID checks.
-The infrastructure is prepared locally and must be deployed separately.
+## Validation
 
-## Failure analysis
+From the repository root, with the backend development requirements installed in
+an activated Python virtual environment:
 
-Follow [analysis setup](infrastructure/ANALYSIS_SETUP.md) to configure the
-read-only GitHub token, Groq API key in Secrets Manager, and update the existing monitoring stack. DynamoDB Streams
-triggers failed-run analysis asynchronously. Groq diagnoses must quote actual
-log evidence; a rules fallback is labeled explicitly. AI is capped at 10 attempts
-per UTC day, and fixes remain unverified until a human checks a new CI run.
-The manual DeployIQ Diagnosis Demo workflow provides a repeatable failure/fix.
+```bash
+python -m pip install -r backend/requirements-dev.txt
+python -m unittest discover -s backend/tests -v
+python -m unittest discover -s evaluation/tests -v
+python infrastructure/scripts/build_monitoring_template.py --check
+```
 
-## Dashboard
+In `frontend/`, run `npm test` and `npm run build`. Application tests use the
+sample service's separate development requirements, as shown above.
+Provider tests mock responses; a deployed diagnosis is needed to establish real
+provider access. For presentation validation, follow [docs/DEMO.md](docs/DEMO.md).
 
-The React frontend in frontend/ shows real run history and failure details.
-Follow [dashboard setup](infrastructure/DASHBOARD_SETUP.md) to update the monitoring
-stack, create a Cognito team login, and run the interface locally. Its read-only
-API requires a verified ID token; public signup is disabled. All invited team
-users share this one repository. AWS hosting resources and a separate dashboard publishing workflow are prepared;
-follow the hosting setup guide to enable them.
+## Boundaries and limitations
 
-## AWS dashboard hosting
+- One configured repository and one shared team workspace; no public signup or
+  tenant isolation between unrelated teams.
+- Ten AI attempts per UTC day, bounded log excerpts, and cached completed
+  diagnoses. Old Rules results do not regenerate merely by refreshing.
+- Redaction detects common secret patterns but cannot guarantee removal of every
+  credential. Only connect appropriate demo logs.
+- Evidence validation confirms that quotes appear in the log; it does not prove
+  the proposed cause or fix. A passing rerun is separate evidence. The dashboard
+  does not automatically link that rerun to an earlier diagnosis or mark it fixed.
+- AWS Bedrock quota access was unavailable for this account; deployed inference
+  uses Groq. Historical Bedrock and Rules records retain their original labels.
+- Container replacement can briefly interrupt the sample service. Rollback is
+  attempted on replacement failure; this is not a high-availability deployment.
+- GitHub artifacts have finite retention. Validated benchmark data stored in
+  DynamoDB remains until deleted. External secrets and retained hosting resources
+  need separate cleanup; budget alerts are not spending caps.
 
-Follow [hosting setup](infrastructure/HOSTING_SETUP.md) to update the existing
-stack with private S3 and CloudFront HTTPS delivery. Set the five GitHub repository
-variables from stack Outputs, then run DeployIQ Dashboard. Main-branch frontend
-changes publish automatically. Authentication and pipeline data stay on the
-existing Cognito/API/Lambda/DynamoDB backend.
+## Repository ownership
 
-## Pipeline optimization experiment
-
-See [the measured cache experiment](evaluation/README.md). The manually triggered
-DeployIQ Cache Benchmark workflow measures fresh dependency installations with
-and without a reused pip cache. Cold fill is separate from the warm-cache median.
-The updated monitoring worker imports the real report and the dashboard displays
-its measurements. Enable this with a stack update, then push the code and run the
-experiment. No speedup is claimed until those measurements exist.
+| Area | Team responsibility |
+| --- | --- |
+| `infrastructure/`, `.github/workflows/`, `sample-app/` | Member 1: AWS, containers, and delivery. |
+| `backend/analysis/` | Member 2: diagnosis worker and provider integration (`ai-engine/` is reserved). |
+| `backend/api/`, `backend/webhooks/` | Member 3: authenticated API, events, and storage. |
+| `frontend/` | Member 4: dashboard, sign-in, and results display. |
+| `evaluation/` | Shared: experiment method, raw measurements, and interpretation. |
