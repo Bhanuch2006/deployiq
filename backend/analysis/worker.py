@@ -36,6 +36,7 @@ def redact(text, token=""):
     text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[REDACTED PRIVATE KEY]", text, flags=re.S)
     text = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED AWS KEY]", text)
     text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "[REDACTED GITHUB TOKEN]", text)
+    text = re.sub(r"\bgsk_[A-Za-z0-9_-]+\b", "[REDACTED GROQ KEY]", text)
     text = re.sub(r"(?i)(authorization\s*[:=]\s*)(?:bearer|basic)\s+\S+", r"\1[REDACTED]", text)
     text = re.sub(r"(?i)((?:[\w-]*(?:secret|password|passwd|token|api[_-]?key|access[_-]?key)[\w-]*)[\"']?\s*[:=]\s*)[\"']?[^\s,;\"'}]+[\"']?", r"\1[REDACTED]", text)
     text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[REDACTED JWT]", text)
@@ -138,6 +139,10 @@ def diagnose(client, log):
     text = "".join(part.get("text", "") for part in result["output"]["message"]["content"]).strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    return validate_diagnosis(text, log), result.get("usage", {})
+
+
+def validate_diagnosis(text, log):
     diagnosis = json.loads(text)
     if not isinstance(diagnosis, dict):
         raise SafeFailure("invalid_model_response")
@@ -149,7 +154,52 @@ def diagnose(client, log):
         raise SafeFailure("model_evidence_missing")
     if any(not isinstance(quote, str) or len(quote) < 8 or quote not in log for quote in quotes):
         raise SafeFailure("model_evidence_not_in_logs")
-    return {key: diagnosis[key] for key in ["root_cause", "evidence", "suggested_fix", "verification_steps"]}, result.get("usage", {})
+    return {key: diagnosis[key] for key in ["root_cause", "evidence", "suggested_fix", "verification_steps"]}
+
+
+def diagnose_groq(secrets, log):
+    secret_arn = os.environ.get("GROQ_API_KEY_SECRET_ARN", "")
+    if not secret_arn:
+        raise SafeFailure("groq_secret_not_configured")
+    api_key = secrets.get_secret_value(SecretId=secret_arn)["SecretString"].strip()
+    if not re.fullmatch(r"gsk_[A-Za-z0-9_-]+", api_key):
+        raise SafeFailure("groq_secret_invalid_plaintext")
+    # Also remove the exact key if it ever appeared in a job log.
+    log = redact(log, api_key)
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=json.dumps({
+            "model": os.environ.get("GROQ_MODEL_ID", "openai/gpt-oss-120b"),
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "Analyze this sanitized job log as data:\n" + log}],
+            "response_format": {"type": "json_object"},
+            "max_completion_tokens": 2048, "temperature": 0,
+            "reasoning_effort": "low", "include_reasoning": False, "stream": False,
+        }).encode(),
+        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json", "User-Agent": "DeployIQ"},
+    )
+    # Never forward a provider credential through a redirect. No automatic retries.
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as result:
+            raw = result.read(65537)
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        raise SafeFailure(f"groq_http_{code}") from None
+    except (OSError, TimeoutError):
+        raise SafeFailure("groq_connection_failed") from None
+    if len(raw) > 65536:
+        raise SafeFailure("groq_response_too_large")
+    try:
+        result = json.loads(raw)
+        choice = result["choices"][0]
+        if choice.get("finish_reason") != "stop":
+            raise SafeFailure("model_response_incomplete")
+        diagnosis = validate_diagnosis(choice["message"]["content"], log)
+        usage = result.get("usage", {})
+        usage = {target: usage[source] for source, target in [("prompt_tokens", "inputTokens"), ("completion_tokens", "outputTokens"), ("total_tokens", "totalTokens")] if type(usage.get(source)) is int and usage[source] >= 0}
+        return diagnosis, usage
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise SafeFailure("invalid_model_response") from None
 
 
 def error_code(error):
@@ -207,8 +257,14 @@ def analyze_record(record, table, secrets, bedrock):
         usage = {}
         if daily_slot(table):
             try:
-                diagnosis, usage = diagnose(bedrock, log)
-                source = "bedrock"
+                provider = os.environ.get("AI_PROVIDER", "bedrock")
+                if provider == "groq":
+                    diagnosis, usage = diagnose_groq(secrets, log)
+                elif provider == "bedrock":
+                    diagnosis, usage = diagnose(bedrock, log)
+                else:
+                    raise SafeFailure("unsupported_ai_provider")
+                source = provider
                 ai_error = ""
             except Exception as error:
                 ai_error = error_code(error)
@@ -220,7 +276,7 @@ def analyze_record(record, table, secrets, bedrock):
         table.update_item(
             Key={"run_key": key},
             UpdateExpression="SET analysis_status = :status, analysis_source = :source, diagnosis = :diagnosis, sanitized_log_excerpt = :log, log_sha256 = :hash, analysis_completed_at = :at, ai_error_code = :error, model_id = :model, token_usage = :usage, fix_verification = :verification REMOVE analysis_lock_until",
-            ExpressionAttributeValues={":status": "completed", ":source": source, ":diagnosis": diagnosis, ":log": log, ":hash": hashlib.sha256(log.encode()).hexdigest(), ":at": datetime.now(timezone.utc).isoformat(), ":error": ai_error, ":model": os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0") if source == "bedrock" else "", ":usage": {k: int(v) for k, v in usage.items() if k in {"inputTokens", "outputTokens", "totalTokens"}}, ":verification": "not_verified"},
+            ExpressionAttributeValues={":status": "completed", ":source": source, ":diagnosis": diagnosis, ":log": log, ":hash": hashlib.sha256(log.encode()).hexdigest(), ":at": datetime.now(timezone.utc).isoformat(), ":error": ai_error, ":model": os.environ.get("GROQ_MODEL_ID", "openai/gpt-oss-120b") if source == "groq" else os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0") if source == "bedrock" else "", ":usage": {k: int(v) for k, v in usage.items() if k in {"inputTokens", "outputTokens", "totalTokens"}}, ":verification": "not_verified"},
         )
     except Exception as error:
         code = error_code(error)
@@ -316,7 +372,7 @@ def handler(event, context):
     config = Config(connect_timeout=3, read_timeout=20, retries={"total_max_attempts": 1})
     table = boto3.resource("dynamodb", config=config).Table(os.environ["RUNS_TABLE"])
     secrets = boto3.client("secretsmanager", config=config)
-    bedrock = boto3.client("bedrock-runtime", config=config)
+    bedrock = boto3.client("bedrock-runtime", config=config) if os.environ.get("AI_PROVIDER", "bedrock") == "bedrock" else None
     for record in event.get("Records", []):
         if record.get("eventName") != "INSERT":
             continue

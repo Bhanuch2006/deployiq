@@ -52,6 +52,7 @@ export function runStats(runs) {
 export function diagnosisLabel(run) {
   if (!run) return 'Pending';
   if (run.analysis_source === 'bedrock') return 'Bedrock AI';
+  if (run.analysis_source === 'groq') return 'Groq AI';
   if (run.analysis_source === 'rules') return 'Rules';
   return run.analysis_status === 'failed' ? 'Analysis failed' : 'Pending';
 }

@@ -19,7 +19,7 @@ DIAGNOSIS = {"root_cause": "The requests import failed.", "evidence": [QUOTE], "
 
 class AnalysisTests(unittest.TestCase):
     def setUp(self):
-        self.env = patch.dict(os.environ, {"ALLOWED_REPOSITORY": "Bhanuch2006/deployiq", "ALLOWED_REPOSITORY_ID": "1421278672", "GITHUB_TOKEN_SECRET_ARN": "test-secret"})
+        self.env = patch.dict(os.environ, {"ALLOWED_REPOSITORY": "Bhanuch2006/deployiq", "ALLOWED_REPOSITORY_ID": "1421278672", "GITHUB_TOKEN_SECRET_ARN": "test-secret", "AI_PROVIDER": "bedrock"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.table = MagicMock()
@@ -126,6 +126,94 @@ class AnalysisTests(unittest.TestCase):
             result = worker.failed_logs("Bhanuch2006/deployiq", 123, 2, "private-token")
         self.assertIn("/attempts/2/jobs", fetch.call_args.args[0])
         self.assertIn(QUOTE, result)
+
+
+class GroqTests(AnalysisTests):
+    def setUp(self):
+        super().setUp()
+        os.environ["AI_PROVIDER"] = "groq"
+        os.environ["GROQ_API_KEY_SECRET_ARN"] = "groq-secret"
+        self.addCleanup(lambda: os.environ.pop("GROQ_API_KEY_SECRET_ARN", None))
+        self.secrets.get_secret_value.side_effect = lambda **kw: {"SecretString": "gsk_private_test_key" if kw["SecretId"] == "groq-secret" else "github_pat_fakevalue"}
+        self.response = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(DIAGNOSIS)}}], "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
+        self.opener = MagicMock()
+        self.opener.open.return_value.__enter__.return_value.read.side_effect = lambda limit: json.dumps(self.response).encode()[:limit]
+        mock_opener = patch.object(worker.urllib.request, "build_opener", return_value=self.opener)
+        mock_opener.start()
+        self.addCleanup(mock_opener.stop)
+
+    def test_success_persists_verified_evidence_and_ai_source(self):
+        values = self.analyze()
+        self.assertEqual(values[":source"], "groq")
+        self.assertEqual(values[":model"], "openai/gpt-oss-120b")
+        self.assertEqual(values[":diagnosis"]["evidence"], [QUOTE])
+        self.assertEqual(values[":usage"], {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150})
+        self.assertEqual(values[":verification"], "not_verified")
+        self.bedrock.converse.assert_not_called()
+        request = self.opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.groq.com/openai/v1/chat/completions")
+        self.assertEqual(request.headers["Authorization"], "Bearer gsk_private_test_key")
+        payload = json.loads(request.data)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("gsk_private_test_key", json.dumps(values))
+        self.assertNotIn("github_pat_fakevalue", request.data.decode())
+
+    def test_hallucinated_evidence_is_rejected(self):
+        self.response["choices"][0]["message"]["content"] = json.dumps({**DIAGNOSIS, "evidence": ["An error that never occurred"]})
+        values = self.analyze()
+        self.assertEqual(values[":source"], "rules")
+        self.assertEqual(values[":error"], "model_evidence_not_in_logs")
+
+    def test_bedrock_access_error_is_labeled_rules(self):
+        # Groq requests never depend on Bedrock permissions.
+        self.bedrock.converse.side_effect = ClientError({"Error": {"Code": "AccessDeniedException"}}, "Converse")
+        self.assertEqual(self.analyze()[":source"], "groq")
+
+    def test_quota_exhaustion_never_calls_bedrock(self):
+        values = self.analyze(quota=False)
+        self.opener.open.assert_not_called()
+        self.assertEqual(values[":source"], "rules")
+        self.assertEqual(values[":error"], "daily_ai_limit_reached")
+
+    def test_rate_limit_is_safe_rules_fallback_without_retry(self):
+        self.opener.open.side_effect = urllib.error.HTTPError("https://api.groq.com", 429, "private response", {}, io.BytesIO(b"private response"))
+        values = self.analyze()
+        self.assertEqual(values[":source"], "rules")
+        self.assertEqual(values[":error"], "groq_http_429")
+        self.opener.open.assert_called_once()
+        self.assertNotIn("private response", json.dumps(values))
+
+    def test_timeout_is_safe_rules_fallback(self):
+        self.opener.open.side_effect = TimeoutError("private URL or token")
+        self.assertEqual(self.analyze()[":error"], "groq_connection_failed")
+
+    def test_incomplete_model_output_is_not_ai_success(self):
+        self.response["choices"][0]["finish_reason"] = "length"
+        self.assertEqual(self.analyze()[":error"], "model_response_incomplete")
+
+    def test_oversize_response_is_rejected(self):
+        self.opener.open.return_value.__enter__.return_value.read.side_effect = lambda limit: b"x" * limit
+        self.assertEqual(self.analyze()[":error"], "groq_response_too_large")
+
+    def test_malformed_response_is_rejected(self):
+        self.response = {"choices": []}
+        self.assertEqual(self.analyze()[":error"], "invalid_model_response")
+
+    def test_json_secret_is_rejected_before_network(self):
+        self.secrets.get_secret_value.side_effect = lambda **kw: {"SecretString": '{"key":"gsk_private"}'}
+        self.assertEqual(self.analyze()[":error"], "groq_secret_invalid_plaintext")
+        self.opener.open.assert_not_called()
+
+    def test_provider_redirect_is_rejected_without_credentials_forwarding(self):
+        # Exercise the real redirect handler separately from the mocked opener.
+        request = worker.urllib.request.Request("https://api.groq.com", headers={"Authorization": "Bearer private"})
+        self.assertIsNone(worker.NoRedirect().redirect_request(request, None, 302, "redirect", {}, "https://other.example"))
+        self.opener.open.side_effect = urllib.error.HTTPError(request.full_url, 302, "redirect", {}, io.BytesIO())
+        self.assertEqual(self.analyze()[":error"], "groq_http_302")
+        self.opener.open.assert_called_once()
+
+    def test_groq_key_redaction(self):
+        self.assertNotIn("gsk_private_test_key", worker.redact("error gsk_private_test_key"))
 
 
 if __name__ == "__main__":

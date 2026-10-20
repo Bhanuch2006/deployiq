@@ -100,8 +100,8 @@ The infrastructure is prepared locally and must be deployed separately.
 ## Failure analysis
 
 Follow [analysis setup](infrastructure/ANALYSIS_SETUP.md) to configure the
-read-only GitHub token and update the existing monitoring stack. DynamoDB Streams
-triggers failed-run analysis asynchronously. Bedrock diagnoses must quote actual
+read-only GitHub token, Groq API key in Secrets Manager, and update the existing monitoring stack. DynamoDB Streams
+triggers failed-run analysis asynchronously. Groq diagnoses must quote actual
 log evidence; a rules fallback is labeled explicitly. AI is capped at 10 attempts
 per UTC day, and fixes remain unverified until a human checks a new CI run.
 The manual DeployIQ Diagnosis Demo workflow provides a repeatable failure/fix.

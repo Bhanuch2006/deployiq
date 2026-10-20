@@ -11,6 +11,7 @@ test('success rate excludes cancellations and empty history is unknown', () => {
 test('rules results are never presented as Bedrock AI', () => {
   assert.equal(diagnosisLabel({analysis_source:'rules', analysis_status:'completed'}), 'Rules');
   assert.equal(diagnosisLabel({analysis_source:'bedrock'}), 'Bedrock AI');
+  assert.equal(diagnosisLabel({analysis_source:'groq'}), 'Groq AI');
 });
 test('only HTTPS API Gateway origins are accepted for bearer tokens', () => {
   assert.equal(validateConfig({apiUrl:'https://abc123.execute-api.us-east-1.amazonaws.com',clientId:'abc123456789'}), true);

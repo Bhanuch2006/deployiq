@@ -95,6 +95,11 @@ def build():
         "Description": "ARN of an existing Secrets Manager secret whose plaintext is a fine-grained GitHub token with Actions read access to this repository.",
         "AllowedPattern": "arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:.+",
     }
+    template["Parameters"]["GroqApiKeySecretArn"] = {
+        "Type": "String",
+        "Description": "ARN of an existing Secrets Manager secret containing ONLY the Groq API key as plaintext. Never enter the key here.",
+        "AllowedPattern": "arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:.+",
+    }
     resources = template["Resources"]
     resources["RunsTable"]["Properties"]["StreamSpecification"] = {"StreamViewType": "NEW_IMAGE"}
     resources["AnalysisDeadLetterQueue"] = {
@@ -114,7 +119,7 @@ def build():
                 {"Effect": "Allow", "Action": ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"], "Resource": {"Fn::GetAtt": ["RunsTable", "StreamArn"]}},
                 {"Effect": "Allow", "Action": "dynamodb:ListStreams", "Resource": "*"},
                 {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue", "Resource": ref("GitHubTokenSecretArn")},
-                {"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": sub("arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.nova-micro-v1:0")},
+                {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue", "Resource": ref("GroqApiKeySecretArn")},
                 {"Effect": "Allow", "Action": "sqs:SendMessage", "Resource": arn("AnalysisDeadLetterQueue")},
                 {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"], "Resource": sub("arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-analyzer:*")},
             ]}}],
@@ -125,7 +130,7 @@ def build():
         "Properties": {
             "FunctionName": sub("${AWS::StackName}-analyzer"), "Runtime": "python3.12", "Handler": "index.handler",
             "Role": arn("AnalysisRole"), "Timeout": 180, "MemorySize": 256,
-            "Environment": {"Variables": {"RUNS_TABLE": ref("RunsTable"), "ALLOWED_REPOSITORY": ref("AllowedRepository"), "ALLOWED_REPOSITORY_ID": ref("AllowedRepositoryId"), "GITHUB_TOKEN_SECRET_ARN": ref("GitHubTokenSecretArn"), "BEDROCK_MODEL_ID": "amazon.nova-micro-v1:0"}},
+            "Environment": {"Variables": {"RUNS_TABLE": ref("RunsTable"), "ALLOWED_REPOSITORY": ref("AllowedRepository"), "ALLOWED_REPOSITORY_ID": ref("AllowedRepositoryId"), "GITHUB_TOKEN_SECRET_ARN": ref("GitHubTokenSecretArn"), "AI_PROVIDER": "groq", "GROQ_API_KEY_SECRET_ARN": ref("GroqApiKeySecretArn"), "GROQ_MODEL_ID": "openai/gpt-oss-120b"}},
             "Code": {"ZipFile": (ROOT / "backend/analysis/worker.py").read_text()},
         },
     }
