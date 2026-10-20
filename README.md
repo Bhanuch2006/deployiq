@@ -5,6 +5,7 @@ for a GitHub Actions pipeline. AWS hosts the application, event processing,
 authentication, storage, and dashboard; Groq supplies AI inference.
 
 [Open the dashboard](https://d27iom2n4u9pw.cloudfront.net/) ·
+[Faculty presentation guide](presentation/README.md) ·
 [Faculty demo script](docs/DEMO.md) · [Cache experiment method](evaluation/README.md)
 
 The dashboard requires an invited Cognito team login. Its public URL does not
